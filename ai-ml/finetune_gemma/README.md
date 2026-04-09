@@ -30,27 +30,28 @@ export HF_TOKEN=your_huggingface_token
 ---
 
 ## 2. Deploy Base Model (Baseline)
-Deploy the base Gemma 4 model using vLLM and GCS Fuse.
+Deploy the base Gemma 4 model using the Vertex AI optimized vLLM image.
 
 ```bash
-gcloud beta run deploy vllm-rtx6000-gemma4-31b-base \
-    --image vllm/vllm-openai:latest \
+gcloud beta run deploy vllm-gemma-4-31b-base \
+    --image="us-docker.pkg.dev/vertex-ai/vertex-vision-model-garden-dockers/pytorch-vllm-serve:gemma4" \
     --region $REGION \
     --no-allow-unauthenticated \
-    --concurrency 10 \
+    --concurrency 16 \
     --cpu 20 \
     --memory 80Gi \
     --gpu 1 \
     --gpu-type nvidia-rtx-pro-6000 \
     --no-gpu-zonal-redundancy \
-    --timeout 3600 \
+    --no-cpu-throttling \
     --network default \
     --subnet default \
     --vpc-egress all-traffic \
-    --add-volume name=models,type=cloud-storage,bucket=$BUCKET_NAME \
-    --add-volume-mount volume=models,mount-path=/mnt/models \
-    --set-env-vars="HF_HUB_ENABLE_HF_TRANSFER=1" \
-    --args="--model","/mnt/models/google/gemma-4-31b-it","--load-format","runai_streamer","--gpu-memory-utilization","0.85","--max-model-len","8192","--trust-remote-code","--port","8080"
+    --set-env-vars "MODEL_NAME=google/gemma-4-31b-it,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_REGION=$REGION" \
+    --startup-probe tcpSocket.port=8080,initialDelaySeconds=240,failureThreshold=1,timeoutSeconds=240,periodSeconds=240 \
+    --command "bash" \
+    --args="^;^-c;vllm serve gs://$BUCKET_NAME/google/gemma-4-31b-it --served-model-name google/gemma-4-31b-it --enable-log-requests --enable-chunked-prefill --enable-prefix-caching --generation-config auto --dtype bfloat16 --quantization fp8 --kv-cache-dtype fp8 --max-num-seqs 8 --gpu-memory-utilization 0.95 --tensor-parallel-size 1 --load-format runai_streamer --port 8080 --host 0.0.0.0 --max-model-len 32767" \
+    --timeout 3600
 ```
 
 ---
@@ -65,8 +66,8 @@ gcloud run deploy pet-analyzer-ui --source . --region $REGION --allow-unauthenti
 
 ---
 
-## 4. Fine-Tuning with Cloud Run Jobs
-Execute the specialized fine-tuning job on a serverless GPU instance to create a LoRA adapter for pet breed identification.
+## 4. Fine-Tuning and Merging with Cloud Run Jobs
+Execute the specialized fine-tuning job on a serverless GPU instance to create a LoRA adapter and merge it into a standalone model.
 
 ### Prepare the Infrastructure
 ```bash
@@ -82,38 +83,37 @@ gcloud storage buckets add-iam-policy-binding gs://$BUCKET_NAME \
 # Build the trainer image
 gcloud builds submit --tag gcr.io/$PROJECT_ID/gemma4-finetune .
 
-# Run the fine-tuning job
+# Run the fine-tuning and merge job
 gcloud beta run jobs execute gemma4-finetuning-job \
   --region $REGION \
-  --args="--model-id","/mnt/gcs/google/gemma-4-31b-it/","--output-dir","/tmp/gemma4-finetuned","--gcs-output-path","gs://$BUCKET_NAME/gemma4-finetuned","--train-size","1000","--learning-rate","5e-5"
+  --args="--model-id","google/gemma-4-31b-it","--output-dir","/tmp/gemma4-merged","--gcs-output-path","gs://$BUCKET_NAME/gemma-4-31b-it-merged","--train-size","1000","--merge"
 ```
 
 ---
 
-## 5. Deploy the Fine-Tuned Model
-Deploy a second service running the same base model but with the new LoRA adapter applied.
+## 5. Deploy the Fine-Tuned (Merged) Model
+Deploy the fine-tuned model. Note that since vLLM does not yet support Gemma 4 LoRA adapters directly, we use the merged standalone model.
 
 ```bash
-gcloud beta run deploy vllm-rtx6000-gemma4-31b-ft \
-    --image vllm/vllm-openai:latest \
+gcloud beta run deploy vllm-gemma-4-31b-ft \
+    --image="us-docker.pkg.dev/vertex-ai/vertex-vision-model-garden-dockers/pytorch-vllm-serve:gemma4" \
     --region $REGION \
     --no-allow-unauthenticated \
-    --concurrency 10 \
+    --concurrency 16 \
     --cpu 20 \
     --memory 80Gi \
     --gpu 1 \
     --gpu-type nvidia-rtx-pro-6000 \
     --no-gpu-zonal-redundancy \
-    --timeout 3600 \
+    --no-cpu-throttling \
     --network default \
     --subnet default \
     --vpc-egress all-traffic \
-    --add-volume name=models,type=cloud-storage,bucket=$BUCKET_NAME \
-    --add-volume-mount volume=models,mount-path=/mnt/models \
-    --add-volume name=finetune,type=cloud-storage,bucket=$BUCKET_NAME \
-    --add-volume-mount volume=finetune,mount-path=/mnt/finetune \
-    --set-env-vars="VLLM_CACHE_ROOT=/tmp/vllm,HF_HUB_ENABLE_HF_TRANSFER=1" \
-    --args="--model","/mnt/models/google/gemma-4-31b-it","--enable-lora","--lora-modules","gemma-4-31b-it-fine-tuned=/mnt/finetune/gemma4-finetuned","--load-format","runai_streamer","--gpu-memory-utilization","0.85","--max-model-len","8192","--trust-remote-code","--port","8080"
+    --set-env-vars "MODEL_NAME=gemma-4-31b-it-finetuned,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_REGION=$REGION" \
+    --startup-probe tcpSocket.port=8080,initialDelaySeconds=240,failureThreshold=1,timeoutSeconds=240,periodSeconds=240 \
+    --command "bash" \
+    --args="^;^-c;vllm serve gs://$BUCKET_NAME/gemma-4-31b-it-merged --served-model-name gemma-4-31b-it-finetuned --enable-log-requests --enable-chunked-prefill --enable-prefix-caching --generation-config auto --dtype bfloat16 --quantization fp8 --kv-cache-dtype fp8 --max-num-seqs 8 --gpu-memory-utilization 0.95 --tensor-parallel-size 1 --load-format runai_streamer --port 8080 --host 0.0.0.0 --max-model-len 32767" \
+    --timeout 3600
 ```
 
 ---
