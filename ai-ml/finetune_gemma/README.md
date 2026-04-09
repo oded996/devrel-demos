@@ -97,8 +97,16 @@ gcloud storage buckets add-iam-policy-binding gs://$BUCKET_NAME \
 
 ### Build & Execute the Job
 ```bash
+export REPO_NAME="gemma4-finetuning-repo"
+
+# Create the Artifact Registry repository
+gcloud artifacts repositories create $REPO_NAME \
+    --repository-format=docker \
+    --location=$REGION \
+    --description="Gemma 4 Fine-tuning images"
+
 # Build the trainer image
-gcloud builds submit --tag gcr.io/$PROJECT_ID/gemma4-finetune .
+gcloud builds submit --tag $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/gemma4-finetune .
 
 # Run the fine-tuning and merge job
 gcloud beta run jobs execute gemma4-finetuning-job \
