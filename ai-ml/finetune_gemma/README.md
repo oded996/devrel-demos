@@ -29,6 +29,27 @@ export HF_TOKEN=your_huggingface_token
 
 ---
 
+## 1.5 VPC Network Setup (High Speed Model Streaming)
+To enable low-latency model streaming from GCS, Cloud Run needs to use Direct VPC Egress with a subnet that has **Private Google Access** enabled.
+
+```bash
+export VPC_NETWORK=vllm-network
+export VPC_SUBNET=vllm-subnet
+
+# Create the VPC network
+gcloud compute networks create $VPC_NETWORK --subnet-mode=custom
+
+# Create the subnet with Private Google Access enabled
+# This is CRITICAL for high-speed model loading from GCS
+gcloud compute networks subnets create $VPC_SUBNET \
+    --network=$VPC_NETWORK \
+    --region=$REGION \
+    --range=10.8.0.0/28 \
+    --enable-private-ip-google-access
+```
+
+---
+
 ## 2. Deploy Base Model (Baseline)
 Deploy the base Gemma 4 model using the Vertex AI optimized vLLM image.
 
